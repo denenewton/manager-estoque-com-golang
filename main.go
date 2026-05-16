@@ -1,10 +1,9 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -16,11 +15,18 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
-	"google.golang.org/genai"
 )
 
-// --- DEFINIÇÕES DE TIPOS (MANTIDOS DO SEU CÓDIGO) ---
+// --- DECLARES GLOBAIS PARA SINCRONIZAÇÃO ---
+var (
+	produtosGlobais   []Produto
+	tabelaVisivel     *widget.Table
+	produtosFiltrados []Produto // Controla o que aparece na busca
+	textoBusca        string
+	janelaPrincipal   fyne.Window
+)
 
+// --- DEFINIÇÕES DE TIPOS ---
 type Medida int
 
 const (
@@ -75,130 +81,99 @@ type Produto struct {
 	CreatedAt  time.Time `json:"data_cadastro"`
 }
 
+func (p Produto) TotalItem() float64 { return p.Price * p.Quantidade }
+
 func (p Produto) String() string {
 	dataTexto := p.CreatedAt.Format("02/01/2006")
 	totalItem := p.Price * p.Quantidade
-	return fmt.Sprintf("Nome: %-12s | Cat: %-10s | Preço: R$ %6.2f | Qtd: %g%-2s | Total: R$ %7.2f | Status: %-12s | Data: %s",
-		p.Name, p.Cat.String(), p.Price, p.Quantidade, p.TipoMedida, totalItem, p.Stock.String(), dataTexto)
+	return fmt.Sprintf("Nome: %-12s | Cat: %-10s | Preço: R$ %6.2f | Qtd: %g%-2s | Total: R$ %7.2f | Status: %-12s | Data: %s", p.Name, p.Cat.String(), p.Price, p.Quantidade, p.TipoMedida, totalItem, p.Stock.String(), dataTexto)
 }
-
-func (p Produto) TotalItem() float64 {
-	return p.Price * p.Quantidade
-}
-
-// Define uma pasta fixa e segura no sistema do usuário para salvar o banco de dados
-func obterCaminhoBanco() string {
-	configDir, err := os.UserConfigDir()
-	if err != nil {
-		return "estoque.json" // Caso falhe, usa o diretório atual
-	}
-	appDir := filepath.Join(configDir, "meu-estoque")
-	os.MkdirAll(appDir, 0755) // Cria a pasta ~/.config/meu-estoque se não existir
-	return filepath.Join(appDir, "estoque.json")
-}
-
-// Define que o relatório vai para a pasta de Documentos e garante que ela exista
-func obterCaminhoRelatorio() string {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return "relatorio.txt" // Se falhar, salva na raiz do projeto
-	}
-
-	// Cria o caminho completo para a pasta Documentos
-	pastaDocumentos := filepath.Join(homeDir, "Documents")
-
-	// Força o Linux a criar a pasta "Documentos" caso ela não exista
-	os.MkdirAll(pastaDocumentos, 0755)
-
-	return filepath.Join(pastaDocumentos, "relatorio.txt")
-}
-
-func salvarJSON(produtos []Produto) error {
-	dados, _ := json.MarshalIndent(produtos, "", "  ")
-	return os.WriteFile(obterCaminhoBanco(), dados, 0644)
-}
-
-func carregarJSON() ([]Produto, error) {
-	dados, err := os.ReadFile(obterCaminhoBanco())
-	if err != nil {
-		return nil, err
-	}
-	var produtos []Produto
-	json.Unmarshal(dados, &produtos)
-	return produtos, nil
-}
-
-func gerarRelatorioTxt(produtos []Produto) error {
-	arquivo, err := os.Create(obterCaminhoRelatorio())
-
-	if err != nil {
-		return err
-	}
-	defer arquivo.Close()
-
-	arquivo.WriteString("========== RELATÓRIO DETALHADO DE ESTOQUE ==========\n\n")
-	resumoMap := make(map[Categoria]float64)
-	totalGeral := 0.0
-
-	for _, p := range produtos {
-		arquivo.WriteString(p.String() + "\n")
-		valorNoEstoque := p.Price * p.Quantidade
-		resumoMap[p.Cat] += valorNoEstoque
-		totalGeral += valorNoEstoque
-	}
-
-	arquivo.WriteString("\n========== RESUMO FINANCEIRO POR CATEGORIA ==========\n")
-	for i := 0; i <= 6; i++ {
-		c := Categoria(i)
-		arquivo.WriteString(fmt.Sprintf("%-12s: R$ %10.2f\n", c.String(), resumoMap[c]))
-	}
-	arquivo.WriteString("----------------------------------------------------\n")
-	arquivo.WriteString(fmt.Sprintf("VALOR TOTAL EM ESTOQUE: R$ %10.2f\n", totalGeral))
-	return nil
-}
-
-// --- RENDERIZAÇÃO DA INTERFACE GRÁFICA ---
 
 func main() {
 	meuApp := app.New()
-	janela := meuApp.NewWindow("Gerenciador de Estoque")
-	janela.Resize(fyne.NewSize(850, 500))
+	janelaPrincipal = meuApp.NewWindow("Controle de Estoque Inteligente")
+	janelaPrincipal.Resize(fyne.NewSize(900, 600))
 
-	produtos, _ := carregarJSON()
+	var err error
+	produtosGlobais, err = carregarProdutos()
+	if err != nil {
+		produtosGlobais = []Produto{}
+	}
+	produtosFiltrados = produtosGlobais
 
-	// Definição dos Cabeçalhos da Tabela
+	telaLista := criarTelaListagem()
+	telaOperacoes := criarTelaOperacoes()
+	telaRelatorio := criarTelaRelatorio()
+
+	abas := container.NewAppTabs(
+		container.NewTabItem("Listar Produtos", telaLista),
+		container.NewTabItem("Operações Estoque", telaOperacoes),
+		container.NewTabItem("Relatório TXT", telaRelatorio),
+	)
+	abas.SetTabLocation(container.TabLocationTop)
+
+	janelaPrincipal.SetContent(abas)
+	janelaPrincipal.ShowAndRun()
+}
+
+func atualizarInterface() {
+	if textoBusca == "" {
+		produtosFiltrados = produtosGlobais
+	} else {
+		produtosFiltrados = []Produto{}
+		for _, p := range produtosGlobais {
+			if strings.Contains(strings.ToLower(p.Name), strings.ToLower(textoBusca)) {
+				produtosFiltrados = append(produtosFiltrados, p)
+			}
+		}
+	}
+	if tabelaVisivel != nil {
+		tabelaVisivel.Refresh()
+	}
+}
+
+// --- CONSTRUTORES DE TELAS ---
+
+func criarTelaListagem() fyne.CanvasObject {
 	cabecalhos := []string{"ID", "Nome", "Categoria", "Preço", "Qtd", "Total", "Status", "Data Cadastro"}
 
-	// Nova Tabela Gráfica estruturada por Linhas e Colunas
-	tabelaVisivel := widget.NewTable(
-		// Define o número de linhas (total de produtos + 1 linha para o cabeçalho)
-		func() (int, int) { return len(produtos) + 1, len(cabecalhos) },
+	inputBusca := widget.NewEntry()
+	inputBusca.SetPlaceHolder("Pesquisar produto por nome...")
+	inputBusca.OnChanged = func(texto string) {
+		textoBusca = texto
+		atualizarInterface()
+	}
 
-		// Cria o elemento visual de texto para cada célula
+	tabelaVisivel = widget.NewTable(
+		func() (int, int) { return len(produtosFiltrados) + 1, len(cabecalhos) },
 		func() fyne.CanvasObject {
 			lbl := widget.NewLabel("Template")
 			lbl.Alignment = fyne.TextAlignLeading
 			return lbl
 		},
-
-		// Preenche os dados dentro de cada célula [Linha, Coluna]
 		func(id widget.TableCellID, obj fyne.CanvasObject) {
 			label := obj.(*widget.Label)
 
-			// LINHA 0: Estiliza e preenche o Cabeçalho Fixo
 			if id.Row == 0 {
 				label.SetText(cabecalhos[id.Col])
-				label.TextStyle = fyne.TextStyle{Bold: true} // Texto em Negrito
+				label.TextStyle = fyne.TextStyle{Bold: true}
 				return
 			}
 
-			// DEMAIS LINHAS: Preenche apenas com os valores brutos dos produtos
-			p := produtos[id.Row-1] // -1 porque a linha 0 é o cabeçalho
+			p := produtosFiltrados[id.Row-1]
 			label.TextStyle = fyne.TextStyle{Bold: false}
+
+			idReal := -1
+			for idx, orig := range produtosGlobais {
+				if orig.Name == p.Name && orig.CreatedAt.Equal(p.CreatedAt) {
+					idReal = idx
+					break
+				}
+			}
 
 			switch id.Col {
 			case 0:
-				label.SetText(fmt.Sprintf("%d", id.Row-1)) // ID do produto
+				label.SetText(fmt.Sprintf("%d", idReal))
 			case 1:
 				label.SetText(p.Name)
 			case 2:
@@ -217,30 +192,39 @@ func main() {
 		},
 	)
 
-	// Ajusta dinamicamente a largura das colunas para os dados não ficarem espremidos
-	tabelaVisivel.SetColumnWidth(0, 40)  // ID
-	tabelaVisivel.SetColumnWidth(1, 140) // Nome
-	tabelaVisivel.SetColumnWidth(2, 100) // Categoria
-	tabelaVisivel.SetColumnWidth(3, 90)  // Preço
-	tabelaVisivel.SetColumnWidth(4, 80)  // Quantidade
-	tabelaVisivel.SetColumnWidth(5, 100) // Total
-	tabelaVisivel.SetColumnWidth(6, 100) // Status
-	tabelaVisivel.SetColumnWidth(7, 110) // Data
+	tabelaVisivel.SetColumnWidth(0, 80)
+	tabelaVisivel.SetColumnWidth(1, 140)
+	tabelaVisivel.SetColumnWidth(2, 100)
+	tabelaVisivel.SetColumnWidth(3, 90)
+	tabelaVisivel.SetColumnWidth(4, 80)
+	tabelaVisivel.SetColumnWidth(5, 100)
+	tabelaVisivel.SetColumnWidth(6, 100)
+	tabelaVisivel.SetColumnWidth(7, 110)
 
-	// Atualiza a função interna que atualiza a tela
-	atualizarInterface := func() {
-		tabelaVisivel.Refresh()
-	}
+	topo := container.NewVBox(
+		widget.NewLabelWithStyle("Estoque Atual", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
+		inputBusca,
+	)
 
-	// Formulário para Adicionar Produto
+	return container.NewBorder(topo, nil, nil, nil, container.NewScroll(tabelaVisivel))
+}
+
+func criarTelaOperacoes() fyne.CanvasObject {
 	inputNome := widget.NewEntry()
-	inputPreco := widget.NewEntry()
-	inputQtd := widget.NewEntry()
+	inputNome.SetPlaceHolder("Nome do Produto")
 
-	selectCat := widget.NewSelect([]string{"Açougue", "Hortifruti", "Limpeza", "Bebidas", "Mercearia", "Padaria", "Laticínios"}, nil)
+	inputPreco := widget.NewEntry()
+	inputPreco.SetPlaceHolder("Preço (Ex: 5.50)")
+
+	inputQtd := widget.NewEntry()
+	inputQtd.SetPlaceHolder("Quantidade")
+
+	categoriasTexto := []string{"Açougue", "Hortifruti", "Limpeza", "Bebidas", "Mercearia", "Padaria", "Laticínios"}
+	selectCat := widget.NewSelect(categoriasTexto, nil)
 	selectCat.SetSelectedIndex(0)
 
-	selectMedida := widget.NewSelect([]string{"un", "kg"}, nil)
+	medidasTexto := []string{"un", "kg"}
+	selectMedida := widget.NewSelect(medidasTexto, nil)
 	selectMedida.SetSelectedIndex(0)
 
 	form := widget.NewForm(
@@ -256,7 +240,7 @@ func main() {
 		qtd, _ := strconv.ParseFloat(inputQtd.Text, 64)
 
 		if inputNome.Text == "" || inputPreco.Text == "" || inputQtd.Text == "" {
-			dialog.ShowError(fmt.Errorf("Por favor, preencha todos os campos!"), janela)
+			dialog.ShowError(fmt.Errorf("Por favor, preencha todos os campos!"), janelaPrincipal)
 			return
 		}
 
@@ -275,137 +259,215 @@ func main() {
 			p.Stock = Indisponivel
 		}
 
-		produtos = append(produtos, p)
-		salvarJSON(produtos)
+		produtosGlobais = append(produtosGlobais, p)
+		salvarJSON(produtosGlobais)
 		atualizarInterface()
 
-		// Limpa os campos de texto após salvar
 		inputNome.SetText("")
 		inputPreco.SetText("")
 		inputQtd.SetText("")
-		dialog.ShowInformation("Sucesso", "Produto adicionado ao estoque!", janela)
+		dialog.ShowInformation("Sucesso", "Produto adicionado ao estoque!", janelaPrincipal)
 	})
 
-	// Operações de gerenciamento de itens selecionados
-	btnRemover := widget.NewButton("Remover Selecionado", func() {
-		// Caixa de diálogo nativa para pedir confirmação de remoção por ID
-		dialog.ShowEntryDialog("Remover Produto", "Digite o número do índice do produto:", func(texto string) {
+	btnRemover := widget.NewButton("Remover por ID", func() {
+		dialog.ShowEntryDialog("Remover Produto", "Digite o número do ID Original do produto:", func(texto string) {
 			idx, err := strconv.Atoi(texto)
-			if err != nil || idx < 0 || idx >= len(produtos) {
-				dialog.ShowError(fmt.Errorf("Índice inválido!"), janela)
+			if err != nil || idx < 0 || idx >= len(produtosGlobais) {
+				dialog.ShowError(fmt.Errorf("ID inválido! Use o ID Original listado na tabela."), janelaPrincipal)
 				return
 			}
-			produtos = append(produtos[:idx], produtos[idx+1:]...)
-			salvarJSON(produtos)
+			produtosGlobais = append(produtosGlobais[:idx], produtosGlobais[idx+1:]...)
+			salvarJSON(produtosGlobais)
 			atualizarInterface()
-			dialog.ShowInformation("Sucesso", "Produto removido!", janela)
-		}, janela)
+			dialog.ShowInformation("Sucesso", "Produto removido!", janelaPrincipal)
+		}, janelaPrincipal)
 	})
 
 	btnEstoque := widget.NewButton("Movimentar Quantidade", func() {
-		dialog.ShowEntryDialog("Ajustar Estoque", "Digite o Índice do produto:", func(idxTexto string) {
+		dialog.ShowEntryDialog("Ajustar Estoque", "Digite o ID Original do produto:", func(idxTexto string) {
 			idx, _ := strconv.Atoi(idxTexto)
-			if idx < 0 || idx >= len(produtos) {
-				dialog.ShowError(fmt.Errorf("Índice não encontrado!"), janela)
+			if idx < 0 || idx >= len(produtosGlobais) {
+				dialog.ShowError(fmt.Errorf("ID não encontrado!"), janelaPrincipal)
 				return
 			}
 			dialog.ShowEntryDialog("Quantidade", "Quantidade (+ entrada, - saída):", func(qtdTexto string) {
 				val, _ := strconv.ParseFloat(qtdTexto, 64)
-				produtos[idx].Quantidade += val
-				if produtos[idx].Quantidade <= 0 {
-					produtos[idx].Quantidade = 0
-					produtos[idx].Stock = Indisponivel
+				produtosGlobais[idx].Quantidade += val
+				if produtosGlobais[idx].Quantidade <= 0 {
+					produtosGlobais[idx].Quantidade = 0
+					produtosGlobais[idx].Stock = Indisponivel
 				} else {
-					produtos[idx].Stock = Disponivel
+					produtosGlobais[idx].Stock = Disponivel
 				}
-				salvarJSON(produtos)
+				salvarJSON(produtosGlobais)
 				atualizarInterface()
-			}, janela)
-		}, janela)
+				dialog.ShowInformation("Sucesso", "Movimentação executada!", janelaPrincipal)
+			}, janelaPrincipal)
+		}, janelaPrincipal)
 	})
 
 	btnPreco := widget.NewButton("Atualizar Preço", func() {
-		dialog.ShowEntryDialog("Alterar Preço", "Digite o Índice do produto:", func(idxTexto string) {
+		dialog.ShowEntryDialog("Alterar Preço", "Digite o ID Original do produto:", func(idxTexto string) {
 			idx, _ := strconv.Atoi(idxTexto)
-			if idx < 0 || idx >= len(produtos) {
-				dialog.ShowError(fmt.Errorf("Índice não encontrado!"), janela)
+			if idx < 0 || idx >= len(produtosGlobais) {
+				dialog.ShowError(fmt.Errorf("ID não encontrado!"), janelaPrincipal)
 				return
 			}
 			dialog.ShowEntryDialog("Novo Preço", "Digite o novo preço (R$):", func(precoTexto string) {
 				nPreco, err := strconv.ParseFloat(precoTexto, 64)
 				if err != nil || nPreco < 0 {
-					dialog.ShowError(fmt.Errorf("Preço inválido!"), janela)
+					dialog.ShowError(fmt.Errorf("Preço inválido!"), janelaPrincipal)
 					return
 				}
-				produtos[idx].Price = nPreco
-				salvarJSON(produtos)
+				produtosGlobais[idx].Price = nPreco
+				salvarJSON(produtosGlobais)
 				atualizarInterface()
-				dialog.ShowInformation("Sucesso", "Preço atualizado com sucesso!", janela)
-			}, janela)
-		}, janela)
+				dialog.ShowInformation("Sucesso", "Preço atualizado com sucesso!", janelaPrincipal)
+			}, janelaPrincipal)
+		}, janelaPrincipal)
 	})
 
-	btnRelatorio := widget.NewButton("Gerar Relatório TXT", func() {
-		err := gerarRelatorioTxt(produtos)
-		if err != nil {
-			dialog.ShowError(err, janela)
+	opcoesPeriodo := []string{"Todo o Estoque", "Diário", "Semanal", "Mensal"}
+	selectPeriodo := widget.NewSelect(opcoesPeriodo, nil)
+	selectPeriodo.SetSelectedIndex(0)
+
+	formRelatorio := widget.NewForm(
+		widget.NewFormItem("Período do Relatório:", selectPeriodo),
+	)
+
+	btnRelatorio := widget.NewButton("Gerar Relatório IA (TXT)", func() {
+		periodoEscolhido := selectPeriodo.Selected
+		produtosFiltradosParaRelatorio := filtraProdutosPorPeriodo(produtosGlobais, periodoEscolhido)
+
+		if len(produtosFiltradosParaRelatorio) == 0 {
+			dialog.ShowInformation("Aviso", fmt.Sprintf("Nenhuma movimentação ou produto encontrado para o período %s.", periodoEscolhido), janelaPrincipal)
 			return
 		}
-		dialog.ShowInformation("Sucesso", "Relatório 'relatorio.txt' exportado!", janela)
-	})
 
-	inputBusca := widget.NewEntry()
-	inputBusca.SetPlaceHolder("Filtrar por nome do produto...")
-	inputBusca.OnChanged = func(termo string) {
-		if termo == "" {
-			produtos, _ = carregarJSON()
-		} else {
-			todos, _ := carregarJSON()
-			var filtrados []Produto
-			for _, p := range todos {
-				if strings.Contains(strings.ToLower(p.Name), strings.ToLower(termo)) {
-					filtrados = append(filtrados, p)
-				}
-			}
-			produtos = filtrados
+		err := gerarRelatorioTxt(produtosFiltradosParaRelatorio, periodoEscolhido)
+		if err != nil {
+			dialog.ShowError(err, janelaPrincipal)
+			return
 		}
-		atualizarInterface()
-	}
-
-	// Layout da Aplicação
-	containerCadastro := container.NewVBox(widget.NewLabel("🆕 CADASTRO DE PRODUTO"), form, btnAdicionar)
-	containerAcoes := container.NewVBox(widget.NewLabel("🛠️ AÇÕES"), btnRemover, btnEstoque, btnPreco, btnRelatorio)
-	painelLateral := container.NewVBox(containerCadastro, widget.NewSeparator(), containerAcoes)
-
-	painelCentral := container.NewBorder(
-		container.NewVBox(widget.NewLabel("📦 ESTOQUE ATUAL"), inputBusca),
-		nil, nil, nil,
-		tabelaVisivel,
-	)
-
-	conteudoPrincipal := container.NewHSplit(painelLateral, painelCentral)
-	conteudoPrincipal.Offset = 0.35
-
-	janela.SetContent(conteudoPrincipal)
-	janela.ShowAndRun()
-
-	ctx := context.Background()
-	client, err := genai.NewClient(ctx, &genai.ClientConfig{
-		APIKey:  "",
-		Backend: genai.BackendGeminiAPI,
+		dialog.ShowInformation("Sucesso", fmt.Sprintf("Relatório %s exportado com sucesso!", periodoEscolhido), janelaPrincipal)
 	})
+
+	// CORREÇÃO: Adicionado o retorno do layout visual que estava ausente
+	layoutBotoes := container.NewVBox(btnAdicionar, btnRemover, btnEstoque, btnPreco, formRelatorio, btnRelatorio)
+	return container.NewScroll(container.NewVBox(widget.NewLabel("Gerenciar Itens e Estoque"), form, layoutBotoes))
+}
+
+func criarTelaRelatorio() fyne.CanvasObject {
+	textoRelatorio := widget.NewMultiLineEntry()
+	textoRelatorio.SetPlaceHolder("Nenhum relatório gerado ainda...")
+	textoRelatorio.Wrapping = fyne.TextWrapWord
+
+	btnCarregar := widget.NewButton("Atualizar/Ler Relatório TXT", func() {
+		caminhoTxt := obterCaminhoRelatorio()
+		dados, err := ioutil.ReadFile(caminhoTxt)
+		if err != nil {
+			textoRelatorio.SetText("Erro ao abrir arquivo. Certifique-se de que clicou em 'Gerar Relatório IA' na aba de Operações.")
+			return
+		}
+		textoRelatorio.SetText(string(dados))
+	})
+
+	return container.NewBorder(container.NewVBox(widget.NewLabel("Visualizador de Relatório"), btnCarregar), nil, nil, nil, textoRelatorio)
+}
+
+func carregarProdutos() ([]Produto, error) {
+	produtos, err := carregarJSON()
 	if err != nil {
-		log.Fatal(err)
+		return nil, err
+	}
+	return produtos, nil
+}
+
+func obterCaminhoBanco() string {
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		return "estoque.json"
+	}
+	appDir := filepath.Join(configDir, "meu-estoque")
+	os.MkdirAll(appDir, 0755)
+	return filepath.Join(appDir, "estoque.json")
+}
+
+func obterCaminhoRelatorio() string {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "relatorio.txt"
+	}
+	pastaDocumentos := filepath.Join(homeDir, "Documents")
+	os.MkdirAll(pastaDocumentos, 0755)
+	return filepath.Join(pastaDocumentos, "relatorio.txt")
+}
+
+func salvarJSON(produtos []Produto) error {
+	dados, _ := json.MarshalIndent(produtos, "", "  ")
+	return os.WriteFile(obterCaminhoBanco(), dados, 0644)
+}
+
+func carregarJSON() ([]Produto, error) {
+	dados, err := os.ReadFile(obterCaminhoBanco())
+	if err != nil {
+		return nil, err
+	}
+	var produtos []Produto
+	json.Unmarshal(dados, &produtos)
+	return produtos, nil
+}
+
+// CORREÇÃO: Alterado de 'produtos' para 'produtosFiltrados' dentro do loop
+func gerarRelatorioTxt(produtosFiltrados []Produto, periodo string) error {
+	arquivo, err := os.Create(obterCaminhoRelatorio())
+	if err != nil {
+		return err
+	}
+	defer arquivo.Close()
+
+	arquivo.WriteString(fmt.Sprintf("========================= RELATÓRIO DETALHADO DE ESTOQUE (%s) ==========\n\n", strings.ToUpper(periodo)))
+	resumoMap := make(map[Categoria]float64)
+	totalGeral := 0.0
+
+	for _, p := range produtosFiltrados {
+		arquivo.WriteString(p.String() + "\n")
+		valorNoEstoque := p.Price * p.Quantidade
+		resumoMap[p.Cat] += valorNoEstoque
+		totalGeral += valorNoEstoque
 	}
 
-	result, err := client.Models.GenerateContent(
-		ctx,
-		"gemini-3-flash-preview",
-		genai.Text("Explain how AI works in a few words"),
-		nil,
-	)
-	if err != nil {
-		log.Fatal(err)
+	arquivo.WriteString("\n========================= RESUMO FINANCEIRO POR CATEGORIA ==========\n\n")
+	for i := 0; i <= 6; i++ {
+		c := Categoria(i)
+		arquivo.WriteString(fmt.Sprintf("%-12s: R$ %10.2f\n", c.String(), resumoMap[c]))
 	}
-	fmt.Println(result.Text())
+	arquivo.WriteString("\n----------------------------------------------------\n")
+	arquivo.WriteString(fmt.Sprintf("VALOR TOTAL EM ESTOQUE: R$ %10.2f\n", totalGeral))
+	return nil
+}
+
+func filtraProdutosPorPeriodo(produtos []Produto, periodo string) []Produto {
+	var filtrados []Produto
+	agora := time.Now()
+
+	for _, p := range produtos {
+		switch periodo {
+		case "Diário":
+			if p.CreatedAt.Year() == agora.Year() && p.CreatedAt.YearDay() == agora.YearDay() {
+				filtrados = append(filtrados, p)
+			}
+		case "Semanal":
+			if agora.Sub(p.CreatedAt) <= 7*24*time.Hour {
+				filtrados = append(filtrados, p)
+			}
+		case "Mensal":
+			if p.CreatedAt.Year() == agora.Year() && p.CreatedAt.Month() == agora.Month() {
+				filtrados = append(filtrados, p)
+			}
+		default:
+			filtrados = append(filtrados, p)
+		}
+	}
+	return filtrados
 }
