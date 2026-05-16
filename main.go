@@ -391,7 +391,7 @@ func main() {
 
 	ctx := context.Background()
 	client, err := genai.NewClient(ctx, &genai.ClientConfig{
-		APIKey:  "AIzaSyDEieudOkWm_kXbnPWrH1X6f_yc9CTcf3M",
+		APIKey:  "",
 		Backend: genai.BackendGeminiAPI,
 	})
 	if err != nil {
