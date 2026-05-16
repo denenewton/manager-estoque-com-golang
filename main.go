@@ -20,6 +20,7 @@ import (
 // --- DECLARES GLOBAIS PARA SINCRONIZAÇÃO ---
 var (
 	produtosGlobais   []Produto
+	historicoVendas   []Venda
 	tabelaVisivel     *widget.Table
 	produtosFiltrados []Produto // Controla o que aparece na busca
 	textoBusca        string
@@ -89,26 +90,42 @@ func (p Produto) String() string {
 	return fmt.Sprintf("Nome: %-12s | Cat: %-10s | Preço: R$ %6.2f | Qtd: %g%-2s | Total: R$ %7.2f | Status: %-12s | Data: %s", p.Name, p.Cat.String(), p.Price, p.Quantidade, p.TipoMedida, totalItem, p.Stock.String(), dataTexto)
 }
 
+// Venda registra o histórico de saídas do estoque
+type Venda struct {
+	Name       string    `json:"nome"`
+	Cat        Categoria `json:"categoria"`
+	Price      float64   `json:"preco_venda"` // Preço praticado no momento da venda
+	Quantidade float64   `json:"quantidade"`
+	TipoMedida Medida    `json:"medida"`
+	SoldAt     time.Time `json:"data_venda"`
+}
+
 func main() {
 	meuApp := app.New()
 	janelaPrincipal = meuApp.NewWindow("Controle de Estoque Inteligente")
-	janelaPrincipal.Resize(fyne.NewSize(900, 600))
+	janelaPrincipal.Resize(fyne.NewSize(900, 800))
 
-	var err error
-	produtosGlobais, err = carregarProdutos()
-	if err != nil {
+	var errp, errv error
+	produtosGlobais, errp = carregarProdutos()
+	historicoVendas, errv = carregarVendasJSON()
+
+	if errp != nil || errv != nil {
 		produtosGlobais = []Produto{}
+		historicoVendas = []Venda{}
 	}
+
 	produtosFiltrados = produtosGlobais
 
 	telaLista := criarTelaListagem()
 	telaOperacoes := criarTelaOperacoes()
 	telaRelatorio := criarTelaRelatorio()
+	telaVendas := criarTelaVendas()
 
 	abas := container.NewAppTabs(
 		container.NewTabItem("Listar Produtos", telaLista),
 		container.NewTabItem("Operações Estoque", telaOperacoes),
 		container.NewTabItem("Relatório TXT", telaRelatorio),
+		container.NewTabItem("Relatório de Vendas", telaVendas),
 	)
 	abas.SetTabLocation(container.TabLocationTop)
 
@@ -236,11 +253,32 @@ func criarTelaOperacoes() fyne.CanvasObject {
 	)
 
 	btnAdicionar := widget.NewButton("Adicionar Produto", func() {
-		preco, _ := strconv.ParseFloat(inputPreco.Text, 64)
-		qtd, _ := strconv.ParseFloat(inputQtd.Text, 64)
+		// Remove espaços em branco acidentais antes de validar
+		nomeLimpo := strings.TrimSpace(inputNome.Text)
+		precoTexto := strings.TrimSpace(inputPreco.Text)
+		qtdTexto := strings.TrimSpace(inputQtd.Text)
 
-		if inputNome.Text == "" || inputPreco.Text == "" || inputQtd.Text == "" {
+		// 1. TRATAMENTO DE ERRO: Garante que nenhum campo foi enviado em branco
+		if nomeLimpo == "" || precoTexto == "" || qtdTexto == "" {
 			dialog.ShowError(fmt.Errorf("Por favor, preencha todos os campos!"), janelaPrincipal)
+			return
+		}
+
+		// Corrige a digitação de vírgulas para o padrão de ponto flutuante do Go
+		precoTexto = strings.ReplaceAll(precoTexto, ",", ".")
+		qtdTexto = strings.ReplaceAll(qtdTexto, ",", ".")
+
+		// 2. TRATAMENTO DE ERRO: Valida o formato do preço (rejeita letras ou fórmulas malucas)
+		preco, err := strconv.ParseFloat(precoTexto, 64)
+		if err != nil || preco < 0 {
+			dialog.ShowError(fmt.Errorf("Preço inválido! Digite apenas números positivos (Ex: 5.50)."), janelaPrincipal)
+			return
+		}
+
+		// 3. TRATAMENTO DE ERRO: Valida o formato da quantidade
+		qtd, err := strconv.ParseFloat(qtdTexto, 64)
+		if err != nil || qtd < 0 {
+			dialog.ShowError(fmt.Errorf("Quantidade inválida! Digite apenas números positivos (Ex: 10 ou 2.5)."), janelaPrincipal)
 			return
 		}
 
@@ -271,27 +309,91 @@ func criarTelaOperacoes() fyne.CanvasObject {
 
 	btnRemover := widget.NewButton("Remover por ID", func() {
 		dialog.ShowEntryDialog("Remover Produto", "Digite o número do ID Original do produto:", func(texto string) {
+			// Remove espaços em branco acidentais antes e depois do texto
+			texto = strings.TrimSpace(texto)
+
+			// TRATAMENTO DE ERRO: Verifica se o usuário digitou letras, caracteres ou fórmulas inválidas
 			idx, err := strconv.Atoi(texto)
-			if err != nil || idx < 0 || idx >= len(produtosGlobais) {
-				dialog.ShowError(fmt.Errorf("ID inválido! Use o ID Original listado na tabela."), janelaPrincipal)
+			if err != nil {
+				dialog.ShowError(fmt.Errorf("O ID deve conter apenas números inteiros!"), janelaPrincipal)
 				return
 			}
+
+			// TRATAMENTO DE ERRO: Garante que o índice existe dentro dos limites do array
+			if idx < 0 || idx >= len(produtosGlobais) {
+				dialog.ShowError(fmt.Errorf("ID não encontrado no sistema! Use o ID Original listado na tabela."), janelaPrincipal)
+				return
+			}
+
+			// Executa a remoção com segurança
 			produtosGlobais = append(produtosGlobais[:idx], produtosGlobais[idx+1:]...)
 			salvarJSON(produtosGlobais)
 			atualizarInterface()
-			dialog.ShowInformation("Sucesso", "Produto removido!", janelaPrincipal)
+			dialog.ShowInformation("Sucesso", "Produto removido com sucesso!", janelaPrincipal)
 		}, janelaPrincipal)
 	})
 
 	btnEstoque := widget.NewButton("Movimentar Quantidade", func() {
 		dialog.ShowEntryDialog("Ajustar Estoque", "Digite o ID Original do produto:", func(idxTexto string) {
-			idx, _ := strconv.Atoi(idxTexto)
-			if idx < 0 || idx >= len(produtosGlobais) {
-				dialog.ShowError(fmt.Errorf("ID não encontrado!"), janelaPrincipal)
+			// Remove espaços em branco acidentais
+			idxTexto = strings.TrimSpace(idxTexto)
+
+			// TRATAMENTO DE ERRO: Verifica se o usuário digitou letras no ID
+			idx, err := strconv.Atoi(idxTexto)
+			if err != nil {
+				dialog.ShowError(fmt.Errorf("O ID deve conter apenas números inteiros!"), janelaPrincipal)
 				return
 			}
+
+			if idx < 0 || idx >= len(produtosGlobais) {
+				dialog.ShowError(fmt.Errorf("ID não encontrado no sistema!"), janelaPrincipal)
+				return
+			}
+
 			dialog.ShowEntryDialog("Quantidade", "Quantidade (+ entrada, - saída):", func(qtdTexto string) {
-				val, _ := strconv.ParseFloat(qtdTexto, 64)
+				// Remove espaços em branco acidentais
+				qtdTexto = strings.TrimSpace(qtdTexto)
+
+				// TRATAMENTO DE ERRO: Impede entradas malucas como "0004-4" ou caracteres inválidos
+				// Substitui vírgulas por pontos caso o usuário digite "2,5" em vez de "2.5"
+				qtdTexto = strings.ReplaceAll(qtdTexto, ",", ".")
+
+				val, err := strconv.ParseFloat(qtdTexto, 64)
+				if err != nil {
+					dialog.ShowError(fmt.Errorf("Quantidade inválida! Digite apenas números (Ex: 5 ou -3.5)."), janelaPrincipal)
+					return
+				}
+
+				// Impede que o usuário digite o número 0, pois não altera o estoque
+				if val == 0 {
+					dialog.ShowError(fmt.Errorf("A quantidade não pode ser zero!"), janelaPrincipal)
+					return
+				}
+
+				// --- LÓGICA DE DETECÇÃO DE VENDA ---
+				if val < 0 {
+					qtdVendida := -val
+
+					// TRATAMENTO DE ERRO: Impede vender mais do que o estoque atual possui
+					if qtdVendida > produtosGlobais[idx].Quantidade {
+						dialog.ShowError(fmt.Errorf("Estoque insuficiente! Estoque atual: %g", produtosGlobais[idx].Quantidade), janelaPrincipal)
+						return
+					}
+
+					novaVenda := Venda{
+						Name:       produtosGlobais[idx].Name,
+						Cat:        produtosGlobais[idx].Cat,
+						Price:      produtosGlobais[idx].Price,
+						Quantidade: qtdVendida,
+						TipoMedida: produtosGlobais[idx].TipoMedida,
+						SoldAt:     time.Now(),
+					}
+
+					historicoVendas = append(historicoVendas, novaVenda)
+					salvarVendasJSON(historicoVendas)
+				}
+				// ----------------------------------------
+
 				produtosGlobais[idx].Quantidade += val
 				if produtosGlobais[idx].Quantidade <= 0 {
 					produtosGlobais[idx].Quantidade = 0
@@ -301,24 +403,42 @@ func criarTelaOperacoes() fyne.CanvasObject {
 				}
 				salvarJSON(produtosGlobais)
 				atualizarInterface()
-				dialog.ShowInformation("Sucesso", "Movimentação executada!", janelaPrincipal)
+				dialog.ShowInformation("Sucesso", "Movimentação executada com sucesso!", janelaPrincipal)
 			}, janelaPrincipal)
 		}, janelaPrincipal)
 	})
 
 	btnPreco := widget.NewButton("Atualizar Preço", func() {
 		dialog.ShowEntryDialog("Alterar Preço", "Digite o ID Original do produto:", func(idxTexto string) {
-			idx, _ := strconv.Atoi(idxTexto)
-			if idx < 0 || idx >= len(produtosGlobais) {
-				dialog.ShowError(fmt.Errorf("ID não encontrado!"), janelaPrincipal)
+			// Remove espaços em branco acidentais
+			idxTexto = strings.TrimSpace(idxTexto)
+
+			// TRATAMENTO DE ERRO: Verifica se o usuário digitou letras ou caracteres inválidos no ID
+			idx, err := strconv.Atoi(idxTexto)
+			if err != nil {
+				dialog.ShowError(fmt.Errorf("O ID deve conter apenas números inteiros!"), janelaPrincipal)
 				return
 			}
+
+			if idx < 0 || idx >= len(produtosGlobais) {
+				dialog.ShowError(fmt.Errorf("ID não encontrado no sistema!"), janelaPrincipal)
+				return
+			}
+
 			dialog.ShowEntryDialog("Novo Preço", "Digite o novo preço (R$):", func(precoTexto string) {
+				// Remove espaços em branco acidentais
+				precoTexto = strings.TrimSpace(precoTexto)
+
+				// TRATAMENTO DE ERRO: Substitui vírgulas por pontos caso digitem "5,50"
+				precoTexto = strings.ReplaceAll(precoTexto, ",", ".")
+
 				nPreco, err := strconv.ParseFloat(precoTexto, 64)
+				// TRATAMENTO DE ERRO: Impede letras, fórmulas inválidas ou valores negativos
 				if err != nil || nPreco < 0 {
-					dialog.ShowError(fmt.Errorf("Preço inválido!"), janelaPrincipal)
+					dialog.ShowError(fmt.Errorf("Preço inválido! Digite apenas números positivos (Ex: 10.50)."), janelaPrincipal)
 					return
 				}
+
 				produtosGlobais[idx].Price = nPreco
 				salvarJSON(produtosGlobais)
 				atualizarInterface()
@@ -326,6 +446,16 @@ func criarTelaOperacoes() fyne.CanvasObject {
 			}, janelaPrincipal)
 		}, janelaPrincipal)
 	})
+
+	// CORREÇÃO: Adicionado o retorno do layout visual que estava ausente
+	layoutBotoes := container.NewVBox(btnAdicionar, btnRemover, btnEstoque, btnPreco)
+	return container.NewScroll(container.NewVBox(widget.NewLabel("Gerenciar Itens e Estoque"), form, layoutBotoes))
+}
+
+func criarTelaRelatorio() fyne.CanvasObject {
+	textoRelatorio := widget.NewMultiLineEntry()
+	textoRelatorio.SetPlaceHolder("Nenhum relatório gerado ainda...")
+	textoRelatorio.Wrapping = fyne.TextWrapWord
 
 	opcoesPeriodo := []string{"Todo o Estoque", "Diário", "Semanal", "Mensal"}
 	selectPeriodo := widget.NewSelect(opcoesPeriodo, nil)
@@ -335,7 +465,7 @@ func criarTelaOperacoes() fyne.CanvasObject {
 		widget.NewFormItem("Período do Relatório:", selectPeriodo),
 	)
 
-	btnRelatorio := widget.NewButton("Gerar Relatório IA (TXT)", func() {
+	btnCarregar := widget.NewButton("Atualizar/Ler Relatório TXT", func() {
 		periodoEscolhido := selectPeriodo.Selected
 		produtosFiltradosParaRelatorio := filtraProdutosPorPeriodo(produtosGlobais, periodoEscolhido)
 
@@ -349,20 +479,7 @@ func criarTelaOperacoes() fyne.CanvasObject {
 			dialog.ShowError(err, janelaPrincipal)
 			return
 		}
-		dialog.ShowInformation("Sucesso", fmt.Sprintf("Relatório %s exportado com sucesso!", periodoEscolhido), janelaPrincipal)
-	})
 
-	// CORREÇÃO: Adicionado o retorno do layout visual que estava ausente
-	layoutBotoes := container.NewVBox(btnAdicionar, btnRemover, btnEstoque, btnPreco, formRelatorio, btnRelatorio)
-	return container.NewScroll(container.NewVBox(widget.NewLabel("Gerenciar Itens e Estoque"), form, layoutBotoes))
-}
-
-func criarTelaRelatorio() fyne.CanvasObject {
-	textoRelatorio := widget.NewMultiLineEntry()
-	textoRelatorio.SetPlaceHolder("Nenhum relatório gerado ainda...")
-	textoRelatorio.Wrapping = fyne.TextWrapWord
-
-	btnCarregar := widget.NewButton("Atualizar/Ler Relatório TXT", func() {
 		caminhoTxt := obterCaminhoRelatorio()
 		dados, err := ioutil.ReadFile(caminhoTxt)
 		if err != nil {
@@ -370,9 +487,113 @@ func criarTelaRelatorio() fyne.CanvasObject {
 			return
 		}
 		textoRelatorio.SetText(string(dados))
+
+		dialog.ShowInformation("Sucesso", fmt.Sprintf("Relatório %s exportado com sucesso!", periodoEscolhido), janelaPrincipal)
 	})
 
-	return container.NewBorder(container.NewVBox(widget.NewLabel("Visualizador de Relatório"), btnCarregar), nil, nil, nil, textoRelatorio)
+	return container.NewBorder(
+		container.NewVBox(widget.NewLabel("Visualizador de Relatório"), formRelatorio, btnCarregar), nil, nil, nil,
+		textoRelatorio)
+}
+
+func criarTelaVendas() fyne.CanvasObject {
+	textoVendas := widget.NewMultiLineEntry()
+	textoVendas.SetPlaceHolder("Nenhum relatório de vendas gerado para o período selecionado...")
+	textoVendas.Wrapping = fyne.TextWrapWord
+
+	opcoesPeriodo := []string{"Todo o Histórico", "Diário", "Semanal", "Mensal"}
+	selectPeriodoVendas := widget.NewSelect(opcoesPeriodo, nil)
+	selectPeriodoVendas.SetSelectedIndex(0)
+
+	btnAnalisar := widget.NewButton("Analisar Faturamento e Vendas", func() {
+		// 1. Filtra as vendas baseado no período escolhido
+		var vendasFiltradas []Venda
+		agora := time.Now()
+		periodo := selectPeriodoVendas.Selected
+
+		for _, v := range historicoVendas {
+			switch periodo {
+			case "Diário":
+				if v.SoldAt.Year() == agora.Year() && v.SoldAt.YearDay() == agora.YearDay() {
+					vendasFiltradas = append(vendasFiltradas, v)
+				}
+			case "Semanal":
+				if agora.Sub(v.SoldAt) <= 7*24*time.Hour {
+					vendasFiltradas = append(vendasFiltradas, v)
+				}
+			case "Mensal":
+				if v.SoldAt.Year() == agora.Year() && v.SoldAt.Month() == agora.Month() {
+					vendasFiltradas = append(vendasFiltradas, v)
+				}
+			default: // "Todo o Histórico"
+				vendasFiltradas = append(vendasFiltradas, v)
+			}
+		}
+
+		if len(vendasFiltradas) == 0 {
+			textoVendas.SetText(fmt.Sprintf("Nenhuma venda registrada no período: %s", periodo))
+			return
+		}
+
+		// 2. Processa os totais e monta a string do relatório
+		var construtor strings.Builder
+		construtor.WriteString(fmt.Sprintf("=================== ANÁLISE DE VENDAS (%s) ===================\n\n", strings.ToUpper(periodo)))
+
+		resumoFaturamento := make(map[Categoria]float64)
+		resumoQuantidades := make(map[string]float64)
+		faturamentoTotal := 0.0
+
+		for _, v := range vendasFiltradas {
+			dataTexto := v.SoldAt.Format("02/01/2006 15:04")
+			totalVendaItem := v.Price * v.Quantidade
+
+			construtor.WriteString(fmt.Sprintf("Item: %-12s | Qtd: %g%-2s | Valor Un: R$ %6.2f | Total: R$ %7.2f | Data: %s\n",
+				v.Name, v.Quantidade, v.TipoMedida.String(), v.Price, totalVendaItem, dataTexto))
+
+			resumoFaturamento[v.Cat] += totalVendaItem
+			faturamentoTotal += totalVendaItem
+			resumoQuantidades[v.Name] += v.Quantidade
+		}
+
+		construtor.WriteString("\n=================== PRODUTOS MAIS VENDIDOS ===================\n\n")
+		for nome, qtd := range resumoQuantidades {
+			construtor.WriteString(fmt.Sprintf("Produto: %-15s | Total Vendido: %g\n", nome, qtd))
+		}
+
+		construtor.WriteString("\n=================== FATURAMENTO POR CATEGORIA ===================\n\n")
+		for i := 0; i <= 6; i++ {
+			c := Categoria(i)
+			construtor.WriteString(fmt.Sprintf("%-12s: R$ %10.2f Faturados\n", c.String(), resumoFaturamento[c]))
+		}
+
+		construtor.WriteString("\n----------------------------------------------------\n")
+		construtor.WriteString(fmt.Sprintf("FATURAMENTO TOTAL DO PERÍODO: R$ %10.2f\n", faturamentoTotal))
+
+		// 3. Exibe o resultado direto na tela para o usuário
+		relatorioTextoCompleto := construtor.String()
+		textoVendas.SetText(relatorioTextoCompleto)
+
+		// --- NOVA LÓGICA: CRIA E SALVA O ARQUIVO TXT AUTOMATICAMENTE ---
+		caminhoEstoque := obterCaminhoRelatorio()
+		caminhoVendas := filepath.Join(filepath.Dir(caminhoEstoque), "relatorio_vendas.txt")
+
+		err := os.WriteFile(caminhoVendas, []byte(relatorioTextoCompleto), 0644)
+		if err != nil {
+			dialog.ShowError(fmt.Errorf("Erro ao salvar o arquivo TXT: %v", err), janelaPrincipal)
+			return
+		}
+
+		// Exibe um aviso de sucesso discreto na janela para o usuário saber onde o arquivo foi salvo
+		dialog.ShowInformation("Sucesso", fmt.Sprintf("Relatório de vendas salvo em:\n%s", caminhoVendas), janelaPrincipal)
+	})
+
+	topo := container.NewVBox(
+		widget.NewLabelWithStyle("Histórico de Faturamento", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
+		widget.NewForm(widget.NewFormItem("Filtrar Período:", selectPeriodoVendas)),
+		btnAnalisar,
+	)
+
+	return container.NewBorder(topo, nil, nil, nil, textoVendas)
 }
 
 func carregarProdutos() ([]Produto, error) {
@@ -393,12 +614,18 @@ func obterCaminhoBanco() string {
 	return filepath.Join(appDir, "estoque.json")
 }
 
-func obterCaminhoRelatorio() string {
+func obterPastaDocuments() string {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
-		return "relatorio.txt"
+		return ""
 	}
 	pastaDocumentos := filepath.Join(homeDir, "Documents")
+	return pastaDocumentos
+}
+
+func obterCaminhoRelatorio() string {
+	pastaDocumentos := obterPastaDocuments()
+
 	os.MkdirAll(pastaDocumentos, 0755)
 	return filepath.Join(pastaDocumentos, "relatorio.txt")
 }
@@ -416,6 +643,39 @@ func carregarJSON() ([]Produto, error) {
 	var produtos []Produto
 	json.Unmarshal(dados, &produtos)
 	return produtos, nil
+}
+
+func salvarVendasJSON(vendas []Venda) error {
+	dados, _ := json.MarshalIndent(vendas, "", "  ")
+
+	// Utiliza a mesma lógica da sua função obterCaminhoBanco, mas direciona para o arquivo vendas.json
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		return os.WriteFile("vendas.json", dados, 0644)
+	}
+	caminhoVendas := filepath.Join(configDir, "meu-estoque", "vendas.json")
+
+	return os.WriteFile(caminhoVendas, dados, 0644)
+}
+
+func carregarVendasJSON() ([]Venda, error) {
+	configDir, err := os.UserConfigDir()
+	var caminhoVendas string
+	if err != nil {
+		caminhoVendas = "vendas.json"
+	} else {
+		caminhoVendas = filepath.Join(configDir, "meu-estoque", "vendas.json")
+	}
+
+	dados, err := os.ReadFile(caminhoVendas)
+	if err != nil {
+		// Se o arquivo ainda não existir (primeira venda), retorna uma lista vazia sem dar erro
+		return []Venda{}, nil
+	}
+
+	var vendas []Venda
+	json.Unmarshal(dados, &vendas)
+	return vendas, nil
 }
 
 // CORREÇÃO: Alterado de 'produtos' para 'produtosFiltrados' dentro do loop

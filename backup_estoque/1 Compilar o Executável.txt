@@ -28,11 +28,20 @@ Type=Application
 Categories=Utility;Development;
 
 
-no mac para instalar o manager stock: precisa de add um Icon.png primeiro
+no mac para instalar o manager stock: precisa de add um Icon.png primeiro:
 
 xcode-select --install
 go install fyne.io/fyne/v2/cmd/fyne@latest
 GOARCH=amd64 fyne package -os darwin -icon Icon.png -appID "com.meuestoque.app"
+
+# 1. Cria uma pasta temporária chamada 'dist'
 mkdir dist
-mv "Controle de Estoque Inteligente.app" dist/
+
+# 2. Move o aplicativo gerado pelo Fyne para dentro dela
+mv "helloword.app" dist/ 2>/dev/null || mv "Controle de Estoque Inteligente.app" dist/
+
+# 3. Transforma a pasta no instalador .dmg nativo do macOS
 hdiutil create -volname "Instalador Estoque" -srcfolder dist -ov -format UDZO "Estoque_Intel_macOS12.dmg"
+
+# 4. Remove a pasta temporária limpa do sistema
+rm -rf dist
