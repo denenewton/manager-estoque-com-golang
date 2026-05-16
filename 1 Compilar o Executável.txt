@@ -1,0 +1,29 @@
+1. Compilar o Executável Ocultando o Terminal
+
+Por padrão, quando rodamos um app gráfico em Go no Linux, uma janela vazia do terminal fica aberta por trás. Para compilar gerando um executável limpo e independente, execute o seguinte comando:
+
+go build -ldflags="-s -w" -o meu-estoque main.go
+
+-ldflags="-s -w": Remove os símbolos de depuração, reduzindo o tamanho do arquivo final em até 40%.
+-o meu-estoque: Define o nome do arquivo executável que será gerado na pasta atual.
+
+2. Criar um Lançador na Área de Trabalho (Ícone com Dois Cliques)
+Mova o executável para uma pasta fixa segura:
+
+mkdir -p ~/.local/bin
+mv meu-estoque ~/.local/bin/
+
+Crie um arquivo de atalho de desktop:
+zed ~/.local/share/applications/meu-estoque.desktop
+
+Cole o conteúdo abaixo dentro dele (salve e feche):
+
+[Desktop Entry]
+Name=Gerenciador de Estoque
+Comment=Controle de produtos e relatórios
+Exec=/home/dene/.local/bin/meu-estoque
+Icon=system-file-manager
+Terminal=false
+Type=Application
+Categories=Utility;Development;
+
