@@ -45,3 +45,9 @@ hdiutil create -volname "Instalador Estoque" -srcfolder dist -ov -format UDZO "E
 
 # 4. Remove a pasta temporária limpa do sistema
 rm -rf dist
+
+
+no DEBIAN
+GOOS=linux GOARCH=amd64 go build -o meu-estoque
+dpkg-deb --build ./meu-estoque-pacote  ~/Downloads/meu-estoque.deb
+sudo apt install --reinstall ~/Downloads/meu-estoque.deb

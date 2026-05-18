@@ -1,0 +1,5 @@
+Package: meu-estoque
+Version: 1.0.0
+Architecture: amd64
+Maintainer: Daniel dos Santos Araujo <denenewton@icloud.com>
+Description: Sistema de Controle de Estoque Inteligente em Go.

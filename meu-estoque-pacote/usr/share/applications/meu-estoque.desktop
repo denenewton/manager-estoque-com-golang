@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Controle de Estoque
+Comment=Sistema Inteligente de Estoque em Go
+Exec=meu-estoque
+Icon=meu-estoque
+Terminal=false
+Categories=Office;Development;
